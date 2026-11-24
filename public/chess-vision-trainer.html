@@ -2055,7 +2055,10 @@
           try {
             const resp = await fetch('/api/stockfish/analyze', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
               body: JSON.stringify({
                 fen,
                 depth: Math.max(5, Math.min(16, Math.round(5 + ((state.elo - 800) / 1600) * 10))),
@@ -2065,7 +2068,9 @@
               }),
             });
             if (resp.ok && seq === analyzeSeq) {
-              const sf = await resp.json();
+              const rawText = await resp.text();
+              const sf = JSON.parse(rawText);
+              if (sf && typeof sf === 'object' && 'scoreType' in sf) {
               state.lastAnalysis = {
                 source: 'stockfish',
                 depth: sf.appliedDepth || sf.depthReached || local.depth,
@@ -2078,8 +2083,9 @@
                 nodes: sf.nodes || local.nodes,
                 timeMs: sf.timeMs || local.timeMs,
               };
-              renderAnalysisUi();
-              renderArrows();
+                renderAnalysisUi();
+                renderArrows();
+              }
             }
           } catch {
             // Offline or standalone file:// — built-in engine remains active

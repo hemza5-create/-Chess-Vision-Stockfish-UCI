@@ -12,7 +12,13 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'chessboard-3d.jpg'],
+        includeAssets: [
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+          'chessboard-3d.jpg',
+        ],
         manifest: {
           id: '/',
           name: 'رَصْد الشطرنج — Stockfish UCI',
@@ -57,6 +63,10 @@ export default defineConfig(() => {
             /^\/chess-vision-open-launcher\.html$/,
           ],
           runtimeCaching: [
+            {
+              urlPattern: /^\/api\/.*/i,
+              handler: 'NetworkOnly',
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

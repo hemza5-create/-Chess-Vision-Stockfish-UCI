@@ -46,23 +46,28 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
   const handleDownloadSelfContainedLauncherHtml = async () => {
     setIsDownloadingHtml(true);
     setDownloadNote(null);
-    try {
-      let embeddedImgSrc = '/chessboard-3d.jpg';
+    const toDataUrl = async (url: string, fallback: string): Promise<string> => {
       try {
-        const imgRes = await fetch(chessboard3dImg);
-        if (imgRes.ok) {
-          const imgBlob = await imgRes.blob();
-          embeddedImgSrc = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () =>
-              resolve(typeof reader.result === 'string' ? reader.result : '/chessboard-3d.jpg');
-            reader.onerror = () => reject(new Error('read failed'));
-            reader.readAsDataURL(imgBlob);
-          });
-        }
+        const res = await fetch(url);
+        if (!res.ok) return fallback;
+        const blob = await res.blob();
+        return await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () =>
+            resolve(typeof reader.result === 'string' ? reader.result : fallback);
+          reader.onerror = () => resolve(fallback);
+          reader.readAsDataURL(blob);
+        });
       } catch {
-        // Keep relative path fallback if inline conversion fails
+        return fallback;
       }
+    };
+
+    try {
+      const [embeddedImgSrc, embeddedBgSrc] = await Promise.all([
+        toDataUrl(chessboard3dImg, '/chessboard-3d.jpg'),
+        toDataUrl('/assets/aistudio/apple-touch-icon_f4ce301f.png', '/assets/aistudio/apple-touch-icon_f4ce301f.png'),
+      ]);
 
       const standaloneHtml = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -70,31 +75,54 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0B0E14" />
+  <link rel="icon" type="image/png" href="${embeddedBgSrc}" />
   <title>رَصْد الشطرنج — افتح</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       min-height: 100%;
-      background: radial-gradient(circle at 50% 0%, #151E2E 0%, #0B0E14 68%);
+      background: #0B0E14;
       color: #F8FAFC;
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Arabic", Arial, sans-serif;
     }
     body {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 20px 16px;
+      overflow-x: hidden;
     }
-    .shell { width: 100%; max-width: 440px; display: flex; flex-direction: column; gap: 14px; }
+    .portrait-bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+    .portrait-bg img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+      display: block;
+    }
+    .portrait-bg::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(11, 14, 20, 0.62) 0%, rgba(11, 14, 20, 0.45) 50%, rgba(11, 14, 20, 0.82) 100%);
+    }
+    .shell { position: relative; z-index: 1; width: 100%; max-width: 440px; display: flex; flex-direction: column; gap: 14px; }
     .open-card {
       display: flex;
       flex-direction: column;
       text-decoration: none;
-      background: #121722;
+      background: rgba(18, 23, 34, 0.9);
+      backdrop-filter: blur(8px);
       border: 1.5px solid #243045;
       border-radius: 24px;
       overflow: hidden;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
       transition: transform 0.16s ease, border-color 0.2s ease;
     }
     .open-card:active { transform: scale(0.985); }
@@ -115,6 +143,9 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
   </style>
 </head>
 <body>
+  <div class="portrait-bg" aria-hidden="true">
+    <img src="${embeddedBgSrc}" alt="" />
+  </div>
   <main class="shell">
     <a class="open-card" href="${TARGET_APP_URL}">
       <div class="open-btn">
@@ -130,7 +161,7 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
 
       const blob = new Blob([standaloneHtml], { type: 'text/html;charset=utf-8' });
       triggerBlobDownload(blob, 'chess-vision-open-launcher.html');
-      setDownloadNote('تم تنزيل صفحة المشغل المتكاملة بالصورة ثلاثية الأبعاد (.html).');
+      setDownloadNote('تم تنزيل صفحة المشغل المتكاملة بالصورة ثلاثية الأبعاد وخلفية التطبيق (.html).');
     } finally {
       setIsDownloadingHtml(false);
     }
@@ -144,15 +175,29 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col overflow-y-auto"
+      className="fixed inset-0 z-50 bg-[#0B0E14] flex flex-col overflow-y-auto isolate"
       role="dialog"
       aria-modal="true"
       aria-label="تطبيق الأندرويد — زر افتح ورقعة الشطرنج ثلاثية الأبعاد"
     >
+      {/* Full-Viewport Portrait Background Image */}
+      <div aria-hidden="true" className="fixed inset-0 -z-10 pointer-events-none overflow-hidden">
+        <img
+          src="/assets/aistudio/apple-touch-icon_f4ce301f.png"
+          alt=""
+          className="w-full h-full object-cover object-center opacity-50"
+        />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#0B0E14]/70 via-[#0B0E14]/55 to-[#0B0E14]/85" />
+      </div>
+
       {/* Compact Sticky Top Bar */}
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 sm:px-6 h-14 bg-[#121722]/95 backdrop-blur border-b border-slate-800 shrink-0">
-        <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-          <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 sm:px-6 h-14 bg-[#121722]/90 backdrop-blur border-b border-slate-800 shrink-0">
+        <div className="flex items-center gap-2.5 text-sm font-semibold text-slate-100">
+          <img
+            src="/assets/aistudio/apple-touch-icon_f4ce301f.png"
+            alt="أيقونة التطبيق"
+            className="w-8 h-8 rounded-lg object-cover border border-amber-500/40 shrink-0"
+          />
           <span>واجهة تطبيق الأندرويد (افتح)</span>
         </div>
         <button
@@ -169,7 +214,14 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
       <div className="flex-1 w-full max-w-5xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
         {/* Left/Center: Integrated Unified "افتح" Button + 3D Chessboard Underneath */}
         <div className="lg:col-span-6 flex flex-col items-center">
-          <div className="w-full max-w-[400px] bg-[#0B0E14] border border-slate-800 rounded-3xl p-4 shadow-2xl">
+          <div className="relative w-full max-w-[400px] bg-[#0B0E14]/80 backdrop-blur-md border border-slate-700/80 rounded-3xl p-4 shadow-2xl overflow-hidden">
+            <img
+              src="/assets/aistudio/apple-touch-icon_f4ce301f.png"
+              alt=""
+              aria-hidden="true"
+              className="absolute inset-0 w-full h-full object-cover object-center opacity-35 pointer-events-none"
+            />
+            <div className="relative z-10">
             <a
               href={TARGET_APP_URL}
               className="group block w-full rounded-2xl overflow-hidden border-2 border-emerald-500/60 bg-[#121722] shadow-xl hover:border-emerald-400 active:scale-[0.985] transition-all focus:outline-none focus:ring-2 focus:ring-emerald-400"
@@ -202,16 +254,17 @@ export const AndroidLauncherModal: React.FC<AndroidLauncherModalProps> = ({ onCl
               </div>
             </a>
 
-            <p className="mt-3 text-center text-xs text-slate-400 leading-relaxed">
-              الزر الكبير <strong className="text-emerald-300">«افتح»</strong> وصورة الرقعة ثلاثية
-              الأبعاد مدمجان معاً؛ الضغط على أي منهما يفتح الرابط المحدد مباشرة.
-            </p>
+              <p className="mt-3 text-center text-xs text-slate-200 leading-relaxed">
+                الزر الكبير <strong className="text-emerald-300">«افتح»</strong> وصورة الرقعة ثلاثية
+                الأبعاد مدمجان معاً؛ الضغط على أي منهما يفتح الرابط المحدد مباشرة.
+              </p>
+            </div>
           </div>
         </div>
 
         {/* Right: Android Studio Kotlin WebView Project Export & Direct Options */}
         <div className="lg:col-span-6 space-y-4">
-          <div className="bg-[#121722] border border-slate-800 rounded-2xl p-5 space-y-4">
+          <div className="bg-[#121722]/90 backdrop-blur-md border border-slate-800 rounded-2xl p-5 space-y-4">
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-100">
                 تجهيز تطبيق الأندرويد وتشغيله

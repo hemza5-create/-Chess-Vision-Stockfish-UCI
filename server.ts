@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
@@ -10,10 +10,11 @@ import { Chess } from 'chess.js';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const PORT = Number(process.env.PORT) || 3000;
-const STOCKFISH_BIN = path.resolve(
-  process.cwd(),
-  'node_modules/stockfish/bin/stockfish-19-lite-single.js'
-);
+const STOCKFISH_BIN = [
+  path.resolve(process.cwd(), 'node_modules/stockfish/bin/stockfish-19-lite-single.js'),
+  path.resolve(import.meta.dirname, 'node_modules/stockfish/bin/stockfish-19-lite-single.js'),
+].find((p) => fs.existsSync(p)) ??
+  path.resolve(process.cwd(), 'node_modules/stockfish/bin/stockfish-19-lite-single.js');
 
 interface UciLineInfo {
   multipv: number;
@@ -102,13 +103,46 @@ class StockfishUciEngine {
   private initPromise: Promise<void> | null = null;
   private queue: Promise<void> = Promise.resolve();
   private lineListeners: Set<(line: string) => void> = new Set();
+  private abortListeners: Set<(err: Error) => void> = new Set();
   private buffer = '';
 
+  private resetProcess(reason?: string) {
+    const oldProc = this.proc;
+    this.proc = null;
+    this.ready = false;
+    this.buffer = '';
+    if (oldProc && !oldProc.killed) {
+      try {
+        oldProc.kill();
+      } catch {
+        // Ignore kill failures
+      }
+    }
+    if (reason) {
+      const err = new Error(reason);
+      for (const rejecter of Array.from(this.abortListeners)) {
+        rejecter(err);
+      }
+    }
+  }
+
+  private writeCommand(proc: ChildProcessWithoutNullStreams | null, command: string) {
+    if (!proc || !proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) {
+      throw new Error('Stockfish input stream is not writable');
+    }
+    proc.stdin.write(`${command}\n`);
+  }
+
   private async ensureReady(): Promise<void> {
-    if (this.proc && this.ready) return;
+    if (this.proc && this.ready && !this.proc.killed) return;
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = new Promise<void>((resolve, reject) => {
+      if (!fs.existsSync(STOCKFISH_BIN)) {
+        reject(new Error(`Stockfish binary not found at ${STOCKFISH_BIN}`));
+        return;
+      }
+
       const proc = spawn(process.execPath, [STOCKFISH_BIN], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -116,30 +150,58 @@ class StockfishUciEngine {
       this.ready = false;
       this.buffer = '';
 
+      let settled = false;
       let gotUciOk = false;
       const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         cleanup();
+        this.resetProcess();
         reject(new Error('Stockfish UCI initialization timed out'));
       }, 10000);
 
       const onLine = (line: string) => {
         if (line === 'uciok' && !gotUciOk) {
           gotUciOk = true;
-          proc.stdin.write('setoption name MultiPV value 3\n');
-          proc.stdin.write('isready\n');
+          try {
+            this.writeCommand(proc, 'setoption name MultiPV value 3');
+            this.writeCommand(proc, 'isready');
+          } catch (err) {
+            if (!settled) {
+              settled = true;
+              cleanup();
+              this.resetProcess();
+              reject(err instanceof Error ? err : new Error('Stockfish init write failed'));
+            }
+          }
         } else if (line === 'readyok') {
+          if (settled) return;
+          settled = true;
           this.ready = true;
           cleanup();
           resolve();
         }
       };
 
+      const onAbort = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+
       const cleanup = () => {
         clearTimeout(timeout);
         this.lineListeners.delete(onLine);
+        this.abortListeners.delete(onAbort);
       };
 
       this.lineListeners.add(onLine);
+      this.abortListeners.add(onAbort);
+
+      proc.stdin.on('error', (err) => {
+        console.error('[Stockfish stdin error]', err.message);
+      });
 
       proc.stdout.on('data', (chunk: Buffer) => {
         this.buffer += chunk.toString('utf8');
@@ -148,7 +210,7 @@ class StockfishUciEngine {
         for (const raw of lines) {
           const trimmed = raw.trim();
           if (!trimmed) continue;
-          for (const listener of this.lineListeners) {
+          for (const listener of Array.from(this.lineListeners)) {
             listener(trimmed);
           }
         }
@@ -159,13 +221,29 @@ class StockfishUciEngine {
         if (msg) console.error('[Stockfish stderr]', msg);
       });
 
-      proc.on('exit', () => {
-        this.proc = null;
-        this.ready = false;
-        this.initPromise = null;
+      proc.on('error', (err) => {
+        console.error('[Stockfish spawn error]', err.message);
+        if (this.proc === proc) {
+          this.resetProcess(`Stockfish process error: ${err.message}`);
+        }
       });
 
-      proc.stdin.write('uci\n');
+      proc.on('exit', (code, signal) => {
+        if (this.proc === proc) {
+          this.resetProcess(`Stockfish process exited unexpectedly (code=${code}, signal=${signal})`);
+        }
+      });
+
+      try {
+        this.writeCommand(proc, 'uci');
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          this.resetProcess();
+          reject(err instanceof Error ? err : new Error('Failed to start Stockfish UCI'));
+        }
+      }
     });
 
     try {
@@ -231,30 +309,54 @@ class StockfishUciEngine {
         };
       }
 
-      await this.ensureReady();
-      if (!this.proc) throw new Error('Stockfish process unavailable');
+      const executeSingleSearch = async (): Promise<StockfishAnalysisResult> => {
+        await this.ensureReady();
+        const activeProc = this.proc;
+        if (!activeProc) throw new Error('Stockfish process unavailable');
 
-      const resolvedDepth =
-        autoDepthByElo && typeof playerElo === 'number' && !Number.isNaN(playerElo)
-          ? eloToSearchDepth(playerElo)
-          : depth;
-      const clampedDepth = Math.max(4, Math.min(20, Math.round(resolvedDepth)));
-      const clampedMultiPv = Math.max(1, Math.min(3, Math.round(multiPv)));
-      const uciLog: string[] = [];
-      if (autoDepthByElo && typeof playerElo === 'number') {
-        uciLog.push(`> info string Elo ${Math.round(playerElo)} -> Auto Search Depth ${clampedDepth}`);
-      }
-      const pvMap = new Map<number, UciLineInfo>();
-      const startTime = Date.now();
+        const safeDepth = Number.isFinite(depth) ? depth : 13;
+        const safeMultiPv = Number.isFinite(multiPv) ? multiPv : 3;
+        const resolvedDepth =
+          autoDepthByElo && typeof playerElo === 'number' && Number.isFinite(playerElo)
+            ? eloToSearchDepth(playerElo)
+            : safeDepth;
+        const clampedDepth = Math.max(4, Math.min(20, Math.round(resolvedDepth)));
+        const clampedMultiPv = Math.max(1, Math.min(3, Math.round(safeMultiPv)));
+        const uciLog: string[] = [];
+        if (autoDepthByElo && typeof playerElo === 'number' && Number.isFinite(playerElo)) {
+          uciLog.push(`> info string Elo ${Math.round(playerElo)} -> Auto Search Depth ${clampedDepth}`);
+        }
+        const pvMap = new Map<number, UciLineInfo>();
+        const startTime = Date.now();
 
-      return new Promise<StockfishAnalysisResult>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          this.proc?.stdin.write('stop\n');
-          this.lineListeners.delete(onLine);
-          reject(new Error('Stockfish search timed out'));
-        }, 15000);
+        return new Promise<StockfishAnalysisResult>((resolve, reject) => {
+          let settled = false;
+          const cleanup = () => {
+            clearTimeout(timeout);
+            this.lineListeners.delete(onLine);
+            this.abortListeners.delete(onAbort);
+          };
 
-        const onLine = (line: string) => {
+          const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              this.writeCommand(this.proc, 'stop');
+            } catch {
+              this.resetProcess();
+            }
+            cleanup();
+            reject(new Error('Stockfish search timed out'));
+          }, 15000);
+
+          const onAbort = (err: Error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(err);
+          };
+
+          const onLine = (line: string) => {
           if (line.startsWith('info ')) {
             if (!line.includes(' pv ')) return;
             uciLog.push(`< ${line}`);
@@ -297,8 +399,9 @@ class StockfishUciEngine {
               timeMs: timeMatch ? Number(timeMatch[1]) : Date.now() - startTime,
             });
           } else if (line.startsWith('bestmove ')) {
-            clearTimeout(timeout);
-            this.lineListeners.delete(onLine);
+            if (settled) return;
+            settled = true;
+            cleanup();
             uciLog.push(`< ${line}`);
 
             const parts = line.split(/\s+/);
@@ -342,18 +445,40 @@ class StockfishUciEngine {
           }
         };
 
-        this.lineListeners.add(onLine);
+          this.lineListeners.add(onLine);
+          this.abortListeners.add(onAbort);
 
-        const cmds = [
-          `setoption name MultiPV value ${clampedMultiPv}`,
-          `position fen ${fen}`,
-          `go depth ${clampedDepth}`,
-        ];
-        for (const cmd of cmds) {
-          uciLog.push(`> ${cmd}`);
-          this.proc!.stdin.write(`${cmd}\n`);
+          const cmds = [
+            `setoption name MultiPV value ${clampedMultiPv}`,
+            `position fen ${fen}`,
+            `go depth ${clampedDepth}`,
+          ];
+          try {
+            for (const cmd of cmds) {
+              uciLog.push(`> ${cmd}`);
+              this.writeCommand(activeProc, cmd);
+            }
+          } catch (err) {
+            if (!settled) {
+              settled = true;
+              cleanup();
+              this.resetProcess();
+              reject(err instanceof Error ? err : new Error('Failed to write UCI command'));
+            }
+          }
+        });
+      };
+
+      try {
+        return await executeSingleSearch();
+      } catch (firstErr) {
+        const msg = firstErr instanceof Error ? firstErr.message : '';
+        if (msg.includes('exited unexpectedly') || msg.includes('not writable') || msg.includes('timed out')) {
+          this.resetProcess();
+          return await executeSingleSearch();
         }
-      });
+        throw firstErr;
+      }
     };
 
     const next = this.queue.then(runTask, runTask);
@@ -384,46 +509,77 @@ function getGeminiClient(): GoogleGenAI {
 
 async function startServer() {
   const app = express();
+
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '4mb' }));
 
-  // Stockfish UCI Analysis Endpoint
-  app.post('/api/stockfish/analyze', async (req: Request, res: Response) => {
-    try {
-      const {
-        fen,
-        depth = 13,
-        multiPv = 3,
-        playerElo,
-        autoDepthByElo = false,
-      } = req.body as {
-        fen?: string;
-        depth?: number;
-        multiPv?: number;
-        playerElo?: number;
-        autoDepthByElo?: boolean;
-      };
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.json({ ok: true, engine: 'stockfish-19-uci' });
+  });
 
-      if (!fen || typeof fen !== 'string') {
+  // Stockfish UCI Analysis Endpoint (Supports both POST JSON body and GET query params)
+  const DEFAULT_INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const handleStockfishAnalyze = async (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    try {
+      const payload =
+        req.method === 'GET'
+          ? (req.query as Record<string, unknown>)
+          : req.body && typeof req.body === 'object'
+          ? (req.body as Record<string, unknown>)
+          : {};
+
+      const rawFen =
+        typeof payload.fen === 'string' && payload.fen.trim().length > 0
+          ? payload.fen.trim()
+          : req.method === 'GET'
+          ? DEFAULT_INITIAL_FEN
+          : '';
+
+      if (!rawFen) {
         res.status(400).json({ error: 'يجب إرسال وضعية FEN صالحة.' });
         return;
       }
 
       // Validate FEN with chess.js
       try {
-        new Chess(fen);
+        new Chess(rawFen);
       } catch {
         res.status(400).json({ error: 'تنسيق FEN غير صالح للتحليل.' });
         return;
       }
 
+      const rawDepth = Number(payload.depth ?? (req.method === 'GET' ? 10 : 13));
+      const safeDepth = Number.isFinite(rawDepth) ? rawDepth : 13;
+
+      const rawMultiPv = Number(payload.multiPv ?? 3);
+      const safeMultiPv = Number.isFinite(rawMultiPv) ? rawMultiPv : 3;
+
+      const rawElo = payload.playerElo !== undefined ? Number(payload.playerElo) : undefined;
       const parsedElo =
-        typeof playerElo === 'number' && !Number.isNaN(playerElo) ? playerElo : undefined;
+        typeof rawElo === 'number' && Number.isFinite(rawElo) ? rawElo : undefined;
+
+      const autoDepthByElo =
+        payload.autoDepthByElo === true || payload.autoDepthByElo === 'true';
+
       const result = await stockfishEngine.analyze(
-        fen,
-        Number(depth),
-        Number(multiPv),
+        rawFen,
+        safeDepth,
+        safeMultiPv,
         parsedElo,
-        Boolean(autoDepthByElo)
+        autoDepthByElo
       );
       res.json(result);
     } catch (error) {
@@ -431,7 +587,12 @@ async function startServer() {
       console.error('[/api/stockfish/analyze]', message);
       res.status(500).json({ error: message });
     }
-  });
+  };
+
+  app.post('/api/stockfish/analyze', handleStockfishAnalyze);
+  app.get('/api/stockfish/analyze', handleStockfishAnalyze);
+  app.get('/api/stockfish', handleStockfishAnalyze);
+  app.post('/api/stockfish', handleStockfishAnalyze);
 
   // Gemini Grandmaster Arabic Commentary Endpoint
   app.post('/api/gemini/explain', async (req: Request, res: Response) => {
@@ -908,6 +1069,17 @@ async function startServer() {
       const chessboardData = fs.existsSync(chessboardPath)
         ? fs.readFileSync(chessboardPath)
         : Buffer.alloc(0);
+      const portraitBgPath = path.resolve(
+        process.cwd(),
+        'public/assets/aistudio/apple-touch-icon_f4ce301f.png'
+      );
+      const portraitBgData = fs.existsSync(portraitBgPath)
+        ? fs.readFileSync(portraitBgPath)
+        : Buffer.alloc(0);
+      const launcherIconPath = path.resolve(process.cwd(), 'public/pwa-192x192.png');
+      const launcherIconData = fs.existsSync(launcherIconPath)
+        ? fs.readFileSync(launcherIconPath)
+        : portraitBgData;
 
       const wrapperDir = path.resolve(process.cwd(), 'tools/gradle-wrapper');
       const gradlewPath = path.join(wrapperDir, 'gradlew');
@@ -1171,6 +1343,8 @@ async function startServer() {
               '',
               '    <application',
               '        android:allowBackup="true"',
+              '        android:icon="@mipmap/ic_launcher"',
+              '        android:roundIcon="@mipmap/ic_launcher_round"',
               '        android:label="@string/app_name"',
               '        android:supportsRtl="true"',
               '        android:theme="@style/Theme.ChessVision">',
@@ -1230,6 +1404,20 @@ async function startServer() {
               '    android:layout_height="match_parent"',
               '    android:background="#0B0E14"',
               '    android:layoutDirection="rtl">',
+              '',
+              '    <!-- خلفية التطبيق الطولية التي تغطي الشاشة بالكامل -->',
+              '    <ImageView',
+              '        android:id="@+id/imgAppBackground"',
+              '        android:layout_width="match_parent"',
+              '        android:layout_height="match_parent"',
+              '        android:importantForAccessibility="no"',
+              '        android:scaleType="centerCrop"',
+              '        android:src="@drawable/app_bg_portrait" />',
+              '',
+              '    <View',
+              '        android:layout_width="match_parent"',
+              '        android:layout_height="match_parent"',
+              '        android:background="#880B0E14" />',
               '',
               '    <!-- الشاشة الرئيسية: زر "افتح" الكبير ومدمج تحته صورة الرقعة ثلاثية الأبعاد -->',
               '    <ScrollView',
@@ -1491,6 +1679,24 @@ async function startServer() {
           data: chessboardData,
         });
       }
+      if (portraitBgData.length > 0) {
+        androidFiles.push({
+          relPath: 'ChessVisionAndroid/app/src/main/res/drawable/app_bg_portrait.png',
+          data: portraitBgData,
+        });
+      }
+      if (launcherIconData.length > 0) {
+        for (const dpi of ['mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
+          androidFiles.push({
+            relPath: `ChessVisionAndroid/app/src/main/res/${dpi}/ic_launcher.png`,
+            data: launcherIconData,
+          });
+          androidFiles.push({
+            relPath: `ChessVisionAndroid/app/src/main/res/${dpi}/ic_launcher_round.png`,
+            data: launcherIconData,
+          });
+        }
+      }
 
       const zipBuffer = buildZipBuffer(androidFiles);
       res.setHeader('Content-Type', 'application/zip');
@@ -1502,6 +1708,30 @@ async function startServer() {
       console.error('[/api/download/android-app.zip]', message);
       res.status(500).json({ error: message });
     }
+  });
+
+  // Ensure any unmatched /api/* route or body-parser error always returns JSON (never HTML)
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).setHeader('Content-Type', 'application/json; charset=utf-8').json({
+      error: 'نقطة النهاية المطلوبة غير موجودة.',
+    });
+  });
+
+  app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const errObj = err as { status?: number; type?: string; message?: string } | null;
+    const status =
+      typeof errObj?.status === 'number' && errObj.status >= 400 && errObj.status < 600
+        ? errObj.status
+        : 400;
+    const message =
+      errObj?.type === 'entity.parse.failed'
+        ? 'بيانات JSON المرسلة غير صالحة.'
+        : errObj?.type === 'entity.too.large'
+        ? 'حجم البيانات المرسلة يتجاوز الحد المسموح.'
+        : errObj?.message || 'حدث خطأ في خادم التحليل.';
+    res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8').json({
+      error: message,
+    });
   });
 
   if (process.env.NODE_ENV !== 'production') {
