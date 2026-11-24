@@ -766,6 +766,97 @@ async function startServer() {
     }
   });
 
+  // Direct Standalone Single-File HTML Trainer Download Endpoint
+  app.get('/api/download/single-file.html', (_req: Request, res: Response) => {
+    const filePath = path.resolve(process.cwd(), 'public/chess-vision-trainer.html');
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'الملف غير موجود.' });
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="chess-vision-trainer.html"');
+    res.sendFile(filePath);
+  });
+
+  // Direct Self-Contained Android Launcher ('افتح' + 3D Chessboard) HTML Download Endpoint
+  app.get('/api/download/open-launcher.html', (_req: Request, res: Response) => {
+    const filePath = path.resolve(process.cwd(), 'public/chess-vision-open-launcher.html');
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'الملف غير موجود.' });
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="chess-vision-open-launcher.html"');
+    res.sendFile(filePath);
+  });
+
+  const buildZipBuffer = (
+    files: { relPath: string; data: Buffer; mode?: number }[]
+  ): Buffer => {
+    const localChunks: Buffer[] = [];
+    const centralChunks: Buffer[] = [];
+    let offset = 0;
+
+    for (const file of files) {
+      const nameBuf = Buffer.from(file.relPath, 'utf8');
+      const compressed = zlib.deflateRawSync(file.data);
+      const crc = zlib.crc32(file.data) >>> 0;
+      const unixMode = file.mode ?? 0o100644;
+
+      // Local file header (30 bytes + filename)
+      const localHeader = Buffer.alloc(30);
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0x0800, 6);
+      localHeader.writeUInt16LE(8, 8);
+      localHeader.writeUInt16LE(0, 10);
+      localHeader.writeUInt16LE(0, 12);
+      localHeader.writeUInt32LE(crc, 14);
+      localHeader.writeUInt32LE(compressed.length, 18);
+      localHeader.writeUInt32LE(file.data.length, 22);
+      localHeader.writeUInt16LE(nameBuf.length, 26);
+      localHeader.writeUInt16LE(0, 28);
+
+      localChunks.push(localHeader, nameBuf, compressed);
+
+      // Central directory header (46 bytes + filename)
+      const centralHeader = Buffer.alloc(46);
+      centralHeader.writeUInt32LE(0x02014b50, 0);
+      centralHeader.writeUInt16LE((3 << 8) | 20, 4); // Unix attributes + PKZIP 2.0
+      centralHeader.writeUInt16LE(20, 6);
+      centralHeader.writeUInt16LE(0x0800, 8);
+      centralHeader.writeUInt16LE(8, 10);
+      centralHeader.writeUInt16LE(0, 12);
+      centralHeader.writeUInt16LE(0, 14);
+      centralHeader.writeUInt32LE(crc, 16);
+      centralHeader.writeUInt32LE(compressed.length, 20);
+      centralHeader.writeUInt32LE(file.data.length, 24);
+      centralHeader.writeUInt16LE(nameBuf.length, 28);
+      centralHeader.writeUInt16LE(0, 30);
+      centralHeader.writeUInt16LE(0, 32);
+      centralHeader.writeUInt16LE(0, 34);
+      centralHeader.writeUInt16LE(0, 36);
+      centralHeader.writeUInt32LE((unixMode << 16) >>> 0, 38);
+      centralHeader.writeUInt32LE(offset, 42);
+
+      centralChunks.push(centralHeader, nameBuf);
+      offset += localHeader.length + nameBuf.length + compressed.length;
+    }
+
+    const centralDir = Buffer.concat(centralChunks);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4);
+    eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(files.length, 8);
+    eocd.writeUInt16LE(files.length, 10);
+    eocd.writeUInt32LE(centralDir.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    eocd.writeUInt16LE(0, 20);
+
+    return Buffer.concat([...localChunks, centralDir, eocd]);
+  };
+
   // Direct Project Source ZIP Download Endpoint
   app.get('/api/download/app.zip', (_req: Request, res: Response) => {
     try {
@@ -779,7 +870,7 @@ async function startServer() {
         '.DS_Store',
       ]);
 
-      const files: { relPath: string; data: Buffer }[] = [];
+      const files: { relPath: string; data: Buffer; mode?: number }[] = [];
       const walk = (dir: string, prefix: string) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           if (excludedNames.has(entry.name) || entry.name.startsWith('.env.')) {
@@ -796,67 +887,7 @@ async function startServer() {
       };
       walk(rootDir, '');
 
-      const localChunks: Buffer[] = [];
-      const centralChunks: Buffer[] = [];
-      let offset = 0;
-
-      for (const file of files) {
-        const nameBuf = Buffer.from(file.relPath, 'utf8');
-        const compressed = zlib.deflateRawSync(file.data);
-        const crc = zlib.crc32(file.data) >>> 0;
-
-        // Local file header (30 bytes + filename)
-        const localHeader = Buffer.alloc(30);
-        localHeader.writeUInt32LE(0x04034b50, 0);
-        localHeader.writeUInt16LE(20, 4); // version needed
-        localHeader.writeUInt16LE(0x0800, 6); // UTF-8 filename flag
-        localHeader.writeUInt16LE(8, 8); // deflate
-        localHeader.writeUInt16LE(0, 10);
-        localHeader.writeUInt16LE(0, 12);
-        localHeader.writeUInt32LE(crc, 14);
-        localHeader.writeUInt32LE(compressed.length, 18);
-        localHeader.writeUInt32LE(file.data.length, 22);
-        localHeader.writeUInt16LE(nameBuf.length, 26);
-        localHeader.writeUInt16LE(0, 28);
-
-        localChunks.push(localHeader, nameBuf, compressed);
-
-        // Central directory header (46 bytes + filename)
-        const centralHeader = Buffer.alloc(46);
-        centralHeader.writeUInt32LE(0x02014b50, 0);
-        centralHeader.writeUInt16LE(20, 4);
-        centralHeader.writeUInt16LE(20, 6);
-        centralHeader.writeUInt16LE(0x0800, 8);
-        centralHeader.writeUInt16LE(8, 10);
-        centralHeader.writeUInt16LE(0, 12);
-        centralHeader.writeUInt16LE(0, 14);
-        centralHeader.writeUInt32LE(crc, 16);
-        centralHeader.writeUInt32LE(compressed.length, 20);
-        centralHeader.writeUInt32LE(file.data.length, 24);
-        centralHeader.writeUInt16LE(nameBuf.length, 28);
-        centralHeader.writeUInt16LE(0, 30);
-        centralHeader.writeUInt16LE(0, 32);
-        centralHeader.writeUInt16LE(0, 34);
-        centralHeader.writeUInt16LE(0, 36);
-        centralHeader.writeUInt32LE(0, 38);
-        centralHeader.writeUInt32LE(offset, 42);
-
-        centralChunks.push(centralHeader, nameBuf);
-        offset += localHeader.length + nameBuf.length + compressed.length;
-      }
-
-      const centralDir = Buffer.concat(centralChunks);
-      const eocd = Buffer.alloc(22);
-      eocd.writeUInt32LE(0x06054b50, 0);
-      eocd.writeUInt16LE(0, 4);
-      eocd.writeUInt16LE(0, 6);
-      eocd.writeUInt16LE(files.length, 8);
-      eocd.writeUInt16LE(files.length, 10);
-      eocd.writeUInt32LE(centralDir.length, 12);
-      eocd.writeUInt32LE(offset, 16);
-      eocd.writeUInt16LE(0, 20);
-
-      const zipBuffer = Buffer.concat([...localChunks, centralDir, eocd]);
+      const zipBuffer = buildZipBuffer(files);
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', 'attachment; filename="chess-vision-uci-app.zip"');
       res.setHeader('Content-Length', String(zipBuffer.length));
@@ -864,6 +895,611 @@ async function startServer() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'فشل تجهيز ملف التنزيل';
       console.error('[/api/download/app.zip]', message);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Android Studio Kotlin WebView Launcher Project ZIP Endpoint (with Complete Gradle 8.9 Wrapper)
+  app.get('/api/download/android-app.zip', (_req: Request, res: Response) => {
+    try {
+      const targetUrl =
+        'https://ais-dev-p4xrlompq6d6vhvb2xmxjf-699178223939.europe-west2.run.app';
+      const chessboardPath = path.resolve(process.cwd(), 'public/chessboard-3d.jpg');
+      const chessboardData = fs.existsSync(chessboardPath)
+        ? fs.readFileSync(chessboardPath)
+        : Buffer.alloc(0);
+
+      const wrapperDir = path.resolve(process.cwd(), 'tools/gradle-wrapper');
+      const gradlewPath = path.join(wrapperDir, 'gradlew');
+      const gradlewBatPath = path.join(wrapperDir, 'gradlew.bat');
+      const wrapperJarPath = path.join(wrapperDir, 'gradle-wrapper.jar');
+      const wrapperPropsPath = path.join(wrapperDir, 'gradle-wrapper.properties');
+
+      if (
+        !fs.existsSync(gradlewPath) ||
+        !fs.existsSync(gradlewBatPath) ||
+        !fs.existsSync(wrapperJarPath) ||
+        !fs.existsSync(wrapperPropsPath)
+      ) {
+        res.status(500).json({ error: 'ملفات Gradle Wrapper غير مكتملة على الخادم.' });
+        return;
+      }
+
+      const androidFiles: { relPath: string; data: Buffer; mode?: number }[] = [
+        {
+          relPath: 'ChessVisionAndroid/README.md',
+          data: Buffer.from(
+            [
+              '# رَصْد الشطرنج — مشروع أندرويد (Kotlin + WebView + Gradle Wrapper)',
+              '',
+              '## المميزات المضمنة',
+              '- زر كبير بارز بعنوان **"افتح"** مدمج تحته صورة رقعة شطرنج ثلاثية الأبعاد (`drawable/chessboard_3d.jpg`).',
+              `- الضغط على الزر أو صورة الرقعة يفتح الرابط: ${targetUrl}`,
+              '- صلاحية الكاميرا (`CAMERA`) مفعلة داخل `WebView` لدعم الرصد البصري بالذكاء الاصطناعي.',
+              '- يتضمن المشروع ملفات **Gradle Wrapper 8.9** كاملة (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`, `gradle/wrapper/gradle-wrapper.properties`).',
+              '- لا يعتمد التطبيق على `google-services.json`، ويقوم مسار `.github/workflows/android.yml` بإنشاء/استعادة `debug.keystore` تلقائياً عبر `keytool` قبل التوقيع والبناء.',
+              '',
+              '## البناء التلقائي على GitHub Actions',
+              '1. فك ضغط الملف وادخل إلى داخل مجلد `ChessVisionAndroid` (تأكد من وجود `.github` و `gradlew` في جذر المستودع).',
+              '2. ارفع المحتوى إلى مستودع GitHub (`git push`).',
+              '3. سيعمل مسار `.github/workflows/android.yml` تلقائياً لتوليد `debug.keystore` وتشغيل `./gradlew assembleDebug` وإخراج ملف `app-debug.apk` القابل للتثبيت في تبويب **Actions > Artifacts**.',
+              '',
+              '## البناء محلياً أو عبر Android Studio',
+              '- افتح مجلد `ChessVisionAndroid` في **Android Studio** واختر **Build > Build APK(s)**، أو شغّل `./gradlew assembleDebug`.',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/.gitignore',
+          data: Buffer.from(
+            [
+              '*.iml',
+              '.gradle',
+              '/local.properties',
+              '/.idea',
+              '.DS_Store',
+              '/build',
+              '/app/build',
+              '/captures',
+              '.cxx',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/gradlew',
+          data: fs.readFileSync(gradlewPath),
+          mode: 0o100755,
+        },
+        {
+          relPath: 'ChessVisionAndroid/gradlew.bat',
+          data: fs.readFileSync(gradlewBatPath),
+        },
+        {
+          relPath: 'ChessVisionAndroid/gradle/wrapper/gradle-wrapper.jar',
+          data: fs.readFileSync(wrapperJarPath),
+        },
+        {
+          relPath: 'ChessVisionAndroid/gradle/wrapper/gradle-wrapper.properties',
+          data: fs.readFileSync(wrapperPropsPath),
+        },
+        {
+          relPath: 'ChessVisionAndroid/.github/workflows/android.yml',
+          data: Buffer.from(
+            [
+              'name: Build Android APK',
+              '',
+              'on:',
+              '  workflow_dispatch:',
+              '  push:',
+              '',
+              'jobs:',
+              '  build:',
+              '    runs-on: ubuntu-latest',
+              '    steps:',
+              '      - name: Checkout Repository',
+              '        uses: actions/checkout@v4',
+              '',
+              '      - name: Set up JDK 17',
+              '        uses: actions/setup-java@v4',
+              '        with:',
+              '          distribution: temurin',
+              '          java-version: "17"',
+              '',
+              '      - name: Setup Android SDK',
+              '        uses: android-actions/setup-android@v3',
+              '',
+              '      - name: Restore or Generate Debug Keystore',
+              '        run: |',
+              '          mkdir -p "$HOME/.android"',
+              '          if [ ! -f "$HOME/.android/debug.keystore" ]; then',
+              '            keytool -genkeypair -v \\',
+              '              -keystore "$HOME/.android/debug.keystore" \\',
+              '              -storepass android \\',
+              '              -alias androiddebugkey \\',
+              '              -keypass android \\',
+              '              -keyalg RSA \\',
+              '              -keysize 2048 \\',
+              '              -validity 10000 \\',
+              '              -dname "CN=Android Debug,O=Android,C=US"',
+              '          fi',
+              '          if [ ! -f "app/debug.keystore" ]; then',
+              '            cp "$HOME/.android/debug.keystore" "app/debug.keystore"',
+              '          fi',
+              '',
+              '      - name: Setup Gradle',
+              '        uses: gradle/actions/setup-gradle@v4',
+              '',
+              '      - name: Grant execute permission for gradlew',
+              '        run: chmod +x gradlew',
+              '',
+              '      - name: Build Debug APK',
+              '        run: ./gradlew assembleDebug --no-daemon --stacktrace',
+              '',
+              '      - name: Verify Installable APK Output',
+              '        run: ls -lh app/build/outputs/apk/debug/app-debug.apk',
+              '',
+              '      - name: Upload APK Artifact',
+              '        uses: actions/upload-artifact@v4',
+              '        with:',
+              '          name: chess-vision-debug-apk',
+              '          path: app/build/outputs/apk/debug/app-debug.apk',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/settings.gradle.kts',
+          data: Buffer.from(
+            [
+              'pluginManagement {',
+              '    repositories {',
+              '        google()',
+              '        mavenCentral()',
+              '        gradlePluginPortal()',
+              '    }',
+              '}',
+              'dependencyResolutionManagement {',
+              '    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)',
+              '    repositories {',
+              '        google()',
+              '        mavenCentral()',
+              '    }',
+              '}',
+              'rootProject.name = "ChessVisionAndroid"',
+              'include(":app")',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/build.gradle.kts',
+          data: Buffer.from(
+            [
+              'plugins {',
+              '    id("com.android.application") version "8.6.1" apply false',
+              '    id("org.jetbrains.kotlin.android") version "2.0.21" apply false',
+              '}',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/gradle.properties',
+          data: Buffer.from(
+            [
+              'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8',
+              'android.useAndroidX=true',
+              'kotlin.code.style=official',
+              'android.nonTransitiveRClass=true',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/build.gradle.kts',
+          data: Buffer.from(
+            [
+              'plugins {',
+              '    id("com.android.application")',
+              '    id("org.jetbrains.kotlin.android")',
+              '}',
+              '',
+              'android {',
+              '    namespace = "com.chessvision.app"',
+              '    compileSdk = 35',
+              '',
+              '    defaultConfig {',
+              '        applicationId = "com.chessvision.app"',
+              '        minSdk = 24',
+              '        targetSdk = 35',
+              '        versionCode = 1',
+              '        versionName = "1.0"',
+              '    }',
+              '',
+              '    signingConfigs {',
+              '        getByName("debug") {',
+              '            val localDebugKeystore = file("debug.keystore")',
+              '            if (localDebugKeystore.exists()) {',
+              '                storeFile = localDebugKeystore',
+              '                storePassword = "android"',
+              '                keyAlias = "androiddebugkey"',
+              '                keyPassword = "android"',
+              '            }',
+              '        }',
+              '    }',
+              '',
+              '    buildTypes {',
+              '        debug {',
+              '            signingConfig = signingConfigs.getByName("debug")',
+              '        }',
+              '        release {',
+              '            isMinifyEnabled = false',
+              '            signingConfig = signingConfigs.getByName("debug")',
+              '        }',
+              '    }',
+              '',
+              '    compileOptions {',
+              '        sourceCompatibility = JavaVersion.VERSION_17',
+              '        targetCompatibility = JavaVersion.VERSION_17',
+              '    }',
+              '    kotlinOptions {',
+              '        jvmTarget = "17"',
+              '    }',
+              '}',
+              '',
+              'dependencies {',
+              '    implementation("androidx.core:core-ktx:1.13.1")',
+              '    implementation("androidx.activity:activity-ktx:1.9.3")',
+              '    implementation("androidx.appcompat:appcompat:1.7.0")',
+              '    implementation("com.google.android.material:material:1.12.0")',
+              '}',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/src/main/AndroidManifest.xml',
+          data: Buffer.from(
+            [
+              '<?xml version="1.0" encoding="utf-8"?>',
+              '<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
+              '    <uses-permission android:name="android.permission.INTERNET" />',
+              '    <uses-permission android:name="android.permission.CAMERA" />',
+              '    <uses-feature android:name="android.hardware.camera" android:required="false" />',
+              '',
+              '    <application',
+              '        android:allowBackup="true"',
+              '        android:label="@string/app_name"',
+              '        android:supportsRtl="true"',
+              '        android:theme="@style/Theme.ChessVision">',
+              '        <activity',
+              '            android:name=".MainActivity"',
+              '            android:exported="true"',
+              '            android:configChanges="orientation|screenSize|keyboardHidden">',
+              '            <intent-filter>',
+              '                <action android:name="android.intent.action.MAIN" />',
+              '                <category android:name="android.intent.category.LAUNCHER" />',
+              '            </intent-filter>',
+              '        </activity>',
+              '    </application>',
+              '</manifest>',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/src/main/res/values/strings.xml',
+          data: Buffer.from(
+            [
+              '<?xml version="1.0" encoding="utf-8"?>',
+              '<resources>',
+              '    <string name="app_name">رَصْد الشطرنج</string>',
+              '    <string name="open_button">افتح</string>',
+              '    <string name="board_content_desc">رقعة شطرنج ثلاثية الأبعاد</string>',
+              '</resources>',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/src/main/res/values/themes.xml',
+          data: Buffer.from(
+            [
+              '<?xml version="1.0" encoding="utf-8"?>',
+              '<resources>',
+              '    <style name="Theme.ChessVision" parent="Theme.Material3.Dark.NoActionBar">',
+              '        <item name="android:statusBarColor">#0B0E14</item>',
+              '        <item name="android:navigationBarColor">#0B0E14</item>',
+              '        <item name="android:windowBackground">#0B0E14</item>',
+              '    </style>',
+              '</resources>',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/src/main/res/layout/activity_main.xml',
+          data: Buffer.from(
+            [
+              '<?xml version="1.0" encoding="utf-8"?>',
+              '<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"',
+              '    xmlns:app="http://schemas.android.com/apk/res-auto"',
+              '    android:layout_width="match_parent"',
+              '    android:layout_height="match_parent"',
+              '    android:background="#0B0E14"',
+              '    android:layoutDirection="rtl">',
+              '',
+              '    <!-- الشاشة الرئيسية: زر "افتح" الكبير ومدمج تحته صورة الرقعة ثلاثية الأبعاد -->',
+              '    <ScrollView',
+              '        android:id="@+id/launcherContainer"',
+              '        android:layout_width="match_parent"',
+              '        android:layout_height="match_parent"',
+              '        android:fillViewport="true">',
+              '',
+              '        <LinearLayout',
+              '            android:layout_width="match_parent"',
+              '            android:layout_height="wrap_content"',
+              '            android:gravity="center"',
+              '            android:orientation="vertical"',
+              '            android:padding="20dp">',
+              '',
+              '            <com.google.android.material.card.MaterialCardView',
+              '                android:id="@+id/launcherCard"',
+              '                android:layout_width="match_parent"',
+              '                android:layout_height="wrap_content"',
+              '                android:clickable="true"',
+              '                android:focusable="true"',
+              '                app:cardBackgroundColor="#121722"',
+              '                app:cardCornerRadius="24dp"',
+              '                app:cardElevation="10dp"',
+              '                app:strokeColor="#10B981"',
+              '                app:strokeWidth="2dp">',
+              '',
+              '                <LinearLayout',
+              '                    android:layout_width="match_parent"',
+              '                    android:layout_height="wrap_content"',
+              '                    android:orientation="vertical">',
+              '',
+              '                    <com.google.android.material.button.MaterialButton',
+              '                        android:id="@+id/btnOpen"',
+              '                        android:layout_width="match_parent"',
+              '                        android:layout_height="76dp"',
+              '                        android:insetTop="0dp"',
+              '                        android:insetBottom="0dp"',
+              '                        android:text="@string/open_button"',
+              '                        android:textColor="#031B13"',
+              '                        android:textSize="28sp"',
+              '                        android:textStyle="bold"',
+              '                        app:backgroundTint="#10B981"',
+              '                        app:cornerRadius="0dp" />',
+              '',
+              '                    <ImageView',
+              '                        android:id="@+id/imgChessboard3d"',
+              '                        android:layout_width="match_parent"',
+              '                        android:layout_height="wrap_content"',
+              '                        android:adjustViewBounds="true"',
+              '                        android:clickable="true"',
+              '                        android:contentDescription="@string/board_content_desc"',
+              '                        android:focusable="true"',
+              '                        android:scaleType="centerCrop"',
+              '                        android:src="@drawable/chessboard_3d" />',
+              '                </LinearLayout>',
+              '            </com.google.android.material.card.MaterialCardView>',
+              '        </LinearLayout>',
+              '    </ScrollView>',
+              '',
+              '    <WebView',
+              '        android:id="@+id/chessWebView"',
+              '        android:layout_width="match_parent"',
+              '        android:layout_height="match_parent"',
+              '        android:visibility="gone" />',
+              '',
+              '    <ProgressBar',
+              '        android:id="@+id/loadingProgress"',
+              '        android:layout_width="wrap_content"',
+              '        android:layout_height="wrap_content"',
+              '        android:layout_gravity="center"',
+              '        android:visibility="gone" />',
+              '</FrameLayout>',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+        {
+          relPath: 'ChessVisionAndroid/app/src/main/java/com/chessvision/app/MainActivity.kt',
+          data: Buffer.from(
+            [
+              'package com.chessvision.app',
+              '',
+              'import android.Manifest',
+              'import android.annotation.SuppressLint',
+              'import android.content.pm.PackageManager',
+              'import android.net.Uri',
+              'import android.os.Bundle',
+              'import android.view.View',
+              'import android.webkit.CookieManager',
+              'import android.webkit.PermissionRequest',
+              'import android.webkit.ValueCallback',
+              'import android.webkit.WebChromeClient',
+              'import android.webkit.WebResourceRequest',
+              'import android.webkit.WebView',
+              'import android.webkit.WebViewClient',
+              'import android.widget.ImageView',
+              'import android.widget.ProgressBar',
+              'import android.widget.ScrollView',
+              'import androidx.activity.OnBackPressedCallback',
+              'import androidx.activity.result.contract.ActivityResultContracts',
+              'import androidx.appcompat.app.AppCompatActivity',
+              'import androidx.core.content.ContextCompat',
+              'import com.google.android.material.button.MaterialButton',
+              'import com.google.android.material.card.MaterialCardView',
+              '',
+              'class MainActivity : AppCompatActivity() {',
+              `    private val targetUrl = "${targetUrl}"`,
+              '    private lateinit var launcherContainer: ScrollView',
+              '    private lateinit var chessWebView: WebView',
+              '    private lateinit var loadingProgress: ProgressBar',
+              '    private var pendingWebPermission: PermissionRequest? = null',
+              '    private var filePathCallback: ValueCallback<Array<Uri>>? = null',
+              '    private var hasLoadedUrl = false',
+              '',
+              '    private val cameraPermissionLauncher =',
+              '        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->',
+              '            pendingWebPermission?.let { req ->',
+              '                if (granted) req.grant(req.resources) else req.deny()',
+              '                pendingWebPermission = null',
+              '            }',
+              '            openChessVisionUrl()',
+              '        }',
+              '',
+              '    private val imagePickerLauncher =',
+              '        registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->',
+              '            filePathCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else null)',
+              '            filePathCallback = null',
+              '        }',
+              '',
+              '    @SuppressLint("SetJavaScriptEnabled")',
+              '    override fun onCreate(savedInstanceState: Bundle?) {',
+              '        super.onCreate(savedInstanceState)',
+              '        setContentView(R.layout.activity_main)',
+              '',
+              '        launcherContainer = findViewById(R.id.launcherContainer)',
+              '        chessWebView = findViewById(R.id.chessWebView)',
+              '        loadingProgress = findViewById(R.id.loadingProgress)',
+              '',
+              '        val launcherCard: MaterialCardView = findViewById(R.id.launcherCard)',
+              '        val btnOpen: MaterialButton = findViewById(R.id.btnOpen)',
+              '        val imgBoard: ImageView = findViewById(R.id.imgChessboard3d)',
+              '',
+              '        CookieManager.getInstance().apply {',
+              '            setAcceptCookie(true)',
+              '            setAcceptThirdPartyCookies(chessWebView, true)',
+              '        }',
+              '',
+              '        chessWebView.settings.apply {',
+              '            javaScriptEnabled = true',
+              '            domStorageEnabled = true',
+              '            useWideViewPort = true',
+              '            loadWithOverviewMode = true',
+              '            allowContentAccess = true',
+              '            allowFileAccess = true',
+              '            mediaPlaybackRequiresUserGesture = false',
+              '        }',
+              '        chessWebView.webViewClient = object : WebViewClient() {',
+              '            override fun shouldOverrideUrlLoading(',
+              '                view: WebView?,',
+              '                request: WebResourceRequest?',
+              '            ): Boolean {',
+              '                return false',
+              '            }',
+              '',
+              '            override fun onPageFinished(view: WebView?, url: String?) {',
+              '                loadingProgress.visibility = View.GONE',
+              '            }',
+              '        }',
+              '        chessWebView.webChromeClient = object : WebChromeClient() {',
+              '            override fun onPermissionRequest(request: PermissionRequest) {',
+              '                runOnUiThread {',
+              '                    val hasCam = ContextCompat.checkSelfPermission(',
+              '                        this@MainActivity,',
+              '                        Manifest.permission.CAMERA',
+              '                    ) == PackageManager.PERMISSION_GRANTED',
+              '                    if (hasCam) {',
+              '                        request.grant(request.resources)',
+              '                    } else {',
+              '                        pendingWebPermission = request',
+              '                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)',
+              '                    }',
+              '                }',
+              '            }',
+              '',
+              '            override fun onShowFileChooser(',
+              '                webView: WebView?,',
+              '                callback: ValueCallback<Array<Uri>>?,',
+              '                fileChooserParams: FileChooserParams?',
+              '            ): Boolean {',
+              '                filePathCallback?.onReceiveValue(null)',
+              '                filePathCallback = callback',
+              '                return try {',
+              '                    imagePickerLauncher.launch("image/*")',
+              '                    true',
+              '                } catch (_: Exception) {',
+              '                    filePathCallback = null',
+              '                    false',
+              '                }',
+              '            }',
+              '        }',
+              '',
+              '        val launchAction = View.OnClickListener { handleOpenClicked() }',
+              '        launcherCard.setOnClickListener(launchAction)',
+              '        btnOpen.setOnClickListener(launchAction)',
+              '        imgBoard.setOnClickListener(launchAction)',
+              '',
+              '        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {',
+              '            override fun handleOnBackPressed() {',
+              '                if (chessWebView.visibility == View.VISIBLE) {',
+              '                    if (chessWebView.canGoBack()) {',
+              '                        chessWebView.goBack()',
+              '                    } else {',
+              '                        chessWebView.visibility = View.GONE',
+              '                        loadingProgress.visibility = View.GONE',
+              '                        launcherContainer.visibility = View.VISIBLE',
+              '                    }',
+              '                } else {',
+              '                    isEnabled = false',
+              '                    onBackPressedDispatcher.onBackPressed()',
+              '                }',
+              '            }',
+              '        })',
+              '    }',
+              '',
+              '    private fun handleOpenClicked() {',
+              '        val hasCam = ContextCompat.checkSelfPermission(',
+              '            this,',
+              '            Manifest.permission.CAMERA',
+              '        ) == PackageManager.PERMISSION_GRANTED',
+              '        if (!hasCam) {',
+              '            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)',
+              '        } else {',
+              '            openChessVisionUrl()',
+              '        }',
+              '    }',
+              '',
+              '    private fun openChessVisionUrl() {',
+              '        launcherContainer.visibility = View.GONE',
+              '        chessWebView.visibility = View.VISIBLE',
+              '        if (!hasLoadedUrl) {',
+              '            hasLoadedUrl = true',
+              '            loadingProgress.visibility = View.VISIBLE',
+              '            chessWebView.loadUrl(targetUrl)',
+              '        } else {',
+              '            loadingProgress.visibility = View.GONE',
+              '        }',
+              '    }',
+              '}',
+            ].join('\n'),
+            'utf8'
+          ),
+        },
+      ];
+
+      if (chessboardData.length > 0) {
+        androidFiles.push({
+          relPath: 'ChessVisionAndroid/app/src/main/res/drawable/chessboard_3d.jpg',
+          data: chessboardData,
+        });
+      }
+
+      const zipBuffer = buildZipBuffer(androidFiles);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="chess-vision-android-app.zip"');
+      res.setHeader('Content-Length', String(zipBuffer.length));
+      res.send(zipBuffer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'فشل تجهيز مشروع الأندرويد';
+      console.error('[/api/download/android-app.zip]', message);
       res.status(500).json({ error: message });
     }
   });

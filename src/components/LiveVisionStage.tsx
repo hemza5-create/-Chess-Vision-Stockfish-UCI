@@ -194,6 +194,7 @@ export const LiveVisionStage: React.FC<LiveVisionStageProps> = ({
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) onUploadImageFile(file);
+              e.target.value = '';
             }}
           />
         </div>
@@ -407,8 +408,10 @@ export const LiveVisionStage: React.FC<LiveVisionStageProps> = ({
                   left: `${pt.x * 100}%`,
                   top: `${pt.y * 100}%`,
                 }}
-                className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-cyan-400/90 border-2 border-slate-950 shadow cursor-grab active:cursor-grabbing hover:scale-110 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-              />
+                className="absolute -translate-x-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full touch-none cursor-grab active:cursor-grabbing group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+              >
+                <span className="w-5 h-5 rounded-full bg-cyan-400/95 border-2 border-slate-950 shadow group-hover:scale-110 transition-transform pointer-events-none" />
+              </button>
             ))}
 
           {/* Live Telemetry Overlay Strip (bottom inside frame with scrim) */}

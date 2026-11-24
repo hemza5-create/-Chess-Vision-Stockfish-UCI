@@ -113,7 +113,12 @@ export const DigitalBoard: React.FC<DigitalBoardProps> = ({
   }, [fen]);
 
   const { boardGrid, legalTargets, turn, checkSquare, promotionMoves } = useMemo(() => {
-    const chess = new Chess(fen);
+    let chess: Chess;
+    try {
+      chess = new Chess(fen);
+    } catch {
+      chess = new Chess();
+    }
     const grid = chess.board();
     const targets = new Set<string>();
     const promos = new Set<string>();

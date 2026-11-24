@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Chess } from 'chess.js';
-import { Copy, Check, Download } from 'lucide-react';
+import { Copy, Check, Download, ExternalLink, Smartphone, X } from 'lucide-react';
 import { LiveVisionStage } from './components/LiveVisionStage';
 import { DigitalBoard } from './components/DigitalBoard';
 import { AnalysisAndVoicePanel } from './components/AnalysisAndVoicePanel';
@@ -9,6 +9,18 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 import { OpenCvChessPipeline, computeFitRoi } from './vision/opencvPipeline';
 import { renderVirtualBoardToCanvas, SAMPLE_GAMES } from './vision/virtualBoardRenderer';
 import { playMoveTapSound, unlockAudioContext } from './utils/soundEffects';
+
+const AndroidLauncherModal = React.lazy(() =>
+  import('./components/AndroidLauncherModal').then((m) => ({ default: m.AndroidLauncherModal }))
+);
+
+let cachedTrainerHtml: string | null = null;
+async function getTrainerHtml(): Promise<string> {
+  if (cachedTrainerHtml) return cachedTrainerHtml;
+  const mod = await import('./trainer/chess-vision-trainer.html?raw');
+  cachedTrainerHtml = mod.default;
+  return cachedTrainerHtml;
+}
 import type {
   CaptureSource,
   FrameTelemetry,
@@ -135,6 +147,17 @@ export default function App() {
   const autoSpeakPendingRef = useRef<boolean>(false);
 
   const [copiedPython, setCopiedPython] = useState<boolean>(false);
+  const [showTrainerOverlay, setShowTrainerOverlay] = useState<boolean>(false);
+  const [loadedTrainerHtml, setLoadedTrainerHtml] = useState<string | null>(cachedTrainerHtml);
+  const [showAndroidLauncher, setShowAndroidLauncher] = useState<boolean>(false);
+  const [copiedSingleFileHtml, setCopiedSingleFileHtml] = useState<boolean>(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (showTrainerOverlay && !loadedTrainerHtml) {
+      void getTrainerHtml().then(setLoadedTrainerHtml);
+    }
+  }, [showTrainerOverlay, loadedTrainerHtml]);
 
   const stopMediaTracks = useCallback(() => {
     if (mediaStreamRef.current) {
@@ -798,9 +821,48 @@ export default function App() {
   };
 
   const handleCopyPython = () => {
-    navigator.clipboard.writeText(PYTHON_REFERENCE_SNIPPET);
+    navigator.clipboard?.writeText(PYTHON_REFERENCE_SNIPPET);
     setCopiedPython(true);
     setTimeout(() => setCopiedPython(false), 1800);
+  };
+
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  };
+
+  const handleDownloadSingleFileBlob = async () => {
+    const html = await getTrainerHtml();
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    triggerBlobDownload(blob, 'chess-vision-trainer.html');
+  };
+
+  const handleCopySingleFileHtml = async () => {
+    const html = await getTrainerHtml();
+    await navigator.clipboard?.writeText(html);
+    setCopiedSingleFileHtml(true);
+    setTimeout(() => setCopiedSingleFileHtml(false), 2000);
+  };
+
+  const handleDownloadZipBlob = async () => {
+    setIsDownloadingZip(true);
+    try {
+      const res = await fetch('/api/download/app.zip');
+      if (!res.ok) throw new Error('Zip failed');
+      const blob = await res.blob();
+      triggerBlobDownload(blob, 'chess-vision-uci-app.zip');
+    } catch {
+      // Fallback: save standalone single-file HTML if ZIP endpoint is blocked
+      handleDownloadSingleFileBlob();
+    } finally {
+      setIsDownloadingZip(false);
+    }
   };
 
   return (
@@ -891,6 +953,30 @@ export default function App() {
             <span className="font-mono tabular-nums" dir="ltr">
               Depth {searchDepth}
             </span>
+            <button
+              type="button"
+              onClick={() => setShowTrainerOverlay(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>فتح مدرب (AR/EN)</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadSingleFileBlob}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-cyan-300 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>تحميل ملف HTML</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAndroidLauncher(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-200 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>مشغّل الأندرويد (افتح)</span>
+            </button>
             <PWAInstallButton />
           </div>
         </section>
@@ -1083,15 +1169,49 @@ export default function App() {
             <h2 className="text-sm font-semibold text-slate-100">
               هيكلة النظام والمرجع البرمجي (Python OpenCV + Stockfish UCI)
             </h2>
-            <div className="flex items-center gap-2 shrink-0">
-              <a
-                href="/api/download/app.zip"
-                download="chess-vision-uci-app.zip"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-cyan-500 hover:bg-cyan-400 rounded-md transition-colors whitespace-nowrap shrink-0"
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowTrainerOverlay(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>تشغيل نسخة الملف الواحد (AR/EN)</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadSingleFileBlob}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 rounded-md transition-colors whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>تنزيل التطبيق (.zip)</span>
-              </a>
+                <span>تنزيل HTML مباشر</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCopySingleFileHtml}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 hover:text-white bg-[#0B0E14] border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+              >
+                {copiedSingleFileHtml ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>تم نسخ كود HTML</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>نسخ كود الملف الواحد</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDownloadZipBlob()}
+                disabled={isDownloadingZip}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isDownloadingZip ? 'جاري التجهيز...' : 'تنزيل التطبيق (.zip)'}</span>
+              </button>
               <button
                 type="button"
                 onClick={handleCopyPython}
@@ -1157,6 +1277,70 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {/* Embedded Standalone Single-File Trainer Overlay (No external URL required) */}
+      {showTrainerOverlay && (
+        <div className="fixed inset-0 z-50 bg-[#0B0E14] flex flex-col">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-[#121722] border-b border-slate-800">
+            <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-slate-100">
+              <span>نسخة الملف الواحد التفاعلية (AR / EN)</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadSingleFileBlob}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-950 bg-cyan-500 hover:bg-cyan-400 rounded-md transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>تنزيل ملف HTML</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCopySingleFileHtml}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-[#0B0E14] border border-slate-700 rounded-md transition-colors"
+              >
+                {copiedSingleFileHtml ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>تم نسخ الكود</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>نسخ الكود</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowTrainerOverlay(false)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-md transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>العودة</span>
+              </button>
+            </div>
+          </div>
+          {loadedTrainerHtml ? (
+            <iframe
+              title="Chess-Vision Trainer AR/EN"
+              srcDoc={loadedTrainerHtml}
+              allow="camera; microphone; clipboard-write"
+              className="flex-1 w-full border-0 bg-[#0B0E14]"
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-sm text-slate-400">
+              جاري تحميل مدرب الشطرنج...
+            </div>
+          )}
+        </div>
+      )}
+      {/* Android Launcher Modal ("افتح" + 3D Chessboard + Kotlin Project ZIP) */}
+      {showAndroidLauncher && (
+        <Suspense fallback={null}>
+          <AndroidLauncherModal onClose={() => setShowAndroidLauncher(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

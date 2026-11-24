@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0B0E14" />
+  <title>رَصْد الشطرنج — افتح التطبيق</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0B0E14;
+      --surface: #121722;
+      --border: #243045;
+      --accent: #10B981;
+      --accent-hover: #34D399;
+      --text: #F8FAFC;
+      --muted: #94A3B8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      min-height: 100%;
+      background: radial-gradient(circle at 50% 0%, #151E2E 0%, #0B0E14 68%);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Arabic", Arial, sans-serif;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px 16px;
+    }
+    .shell {
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: stretch;
+    }
+    .unified-open-card {
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+      transition: transform 0.16s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      -webkit-tap-highlight-color: transparent;
+      cursor: pointer;
+    }
+    .unified-open-card:hover {
+      border-color: rgba(16, 185, 129, 0.65);
+      box-shadow: 0 28px 68px rgba(16, 185, 129, 0.16);
+    }
+    .unified-open-card:active {
+      transform: scale(0.985);
+    }
+    .open-cta {
+      min-height: 74px;
+      padding: 18px 24px;
+      background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+      color: #031B13;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    .open-cta svg {
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+    }
+    .board-stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #0B0E14;
+      overflow: hidden;
+    }
+    .board-stage img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.35s ease;
+    }
+    .unified-open-card:hover .board-stage img {
+      transform: scale(1.025);
+    }
+    .caption {
+      text-align: center;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--muted);
+      padding: 0 8px;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <a
+      id="openAppBtn"
+      class="unified-open-card"
+      href="https://ais-dev-p4xrlompq6d6vhvb2xmxjf-699178223939.europe-west2.run.app"
+      rel="noopener noreferrer"
+    >
+      <div class="open-cta">
+        <span>افتح</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 12h14" />
+          <path d="m12 5-7 7 7 7" />
+        </svg>
+      </div>
+      <div class="board-stage">
+        <img
+          src="/chessboard-3d.jpg"
+          alt="رقعة شطرنج ثلاثية الأبعاد بجميع القطع"
+          onerror="this.style.display='none'"
+        />
+      </div>
+    </a>
+    <p class="caption">
+      اضغط على زر <strong>افتح</strong> أو صورة رقعة الشطرنج ثلاثية الأبعاد للانتقال مباشرة إلى رَصْد الشطرنج عبر Stockfish.
+    </p>
+  </main>
+</body>
+</html>
